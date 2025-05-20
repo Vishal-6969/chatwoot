@@ -1,32 +1,34 @@
-module IncomingEmailValidityHelper
+module NeuraIncomingEmailValidationHelper
   private
 
-  def incoming_email_from_valid_email?
-    return false unless valid_external_email_for_active_account?
-
-    # we skip processing auto reply emails like delivery status notifications
-    # out of office replies, etc.
-    return false if auto_reply_email?
-
-    # return if email doesn't have a valid sender
-    # This can happen in cases like bounce emails for invalid contact email address
-    # TODO: Handle the bounce separately and mark the contact as invalid in case of reply bounces
-    # The returned value could be "\"\"" for some email clients
-    return false unless Devise.email_regexp.match?(@processed_mail.original_sender)
+  # Determines whether the incoming email should be processed.
+  # Validates that:
+  # - The sender address is external and linked to an active account
+  # - The email is not an auto-reply
+  # - The sender email format is valid
+  def valid_incoming_email?
+    return false unless external_email_for_active_account?
+    return false if auto_reply_message?
+    return false unless Devise.email_regexp.match?(@incoming_mail.original_sender)
 
     true
   end
 
-  def valid_external_email_for_active_account?
+  # Checks whether the email originates from a valid sender
+  # and the associated account is active.
+  # Prevents handling of system-generated emails (e.g., platform alerts).
+  def external_email_for_active_account?
     return false unless @account.active?
-    return false if @processed_mail.notification_email_from_chatwoot?
+    return false if @incoming_mail.system_notification_from_neurachat?
 
     true
   end
 
-  def auto_reply_email?
-    if @processed_mail.auto_reply?
-      Rails.logger.info "is_auto_reply? : #{processed_mail.auto_reply?}"
+  # Identifies whether the email is an auto-reply
+  # such as vacation responders or delivery failures.
+  def auto_reply_message?
+    if @incoming_mail.auto_reply?
+      Rails.logger.info "[NeuraChat] Skipped auto-reply email"
       true
     else
       false
