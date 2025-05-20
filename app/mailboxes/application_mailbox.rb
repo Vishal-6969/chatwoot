@@ -1,56 +1,61 @@
 class ApplicationMailbox < ActionMailbox::Base
   include MailboxHelper
 
-  # Last part is the regex for the UUID
-  # Eg: email should be something like : reply+6bdc3f4d-0bec-4515-a284-5d916fdde489@domain.com
+  # Extracts UUID from email addresses like: reply+<UUID>@domain.com
   REPLY_EMAIL_UUID_PATTERN = /^reply\+([0-9a-f]{8}\b-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-\b[0-9a-f]{12})$/i
+
+  # Matches emails with conversation metadata in the `in-reply-to` header:
+  # Example: conversation/xyz/messages/123@inbound.domain.com
   CONVERSATION_MESSAGE_ID_PATTERN = %r{conversation/([a-zA-Z0-9-]*?)/messages/(\d+?)@(\w+\.\w+)}
 
-  # routes as a reply to existing conversations
+  # Route to ReplyMailbox: if email is a reply to an existing conversation
   routing(
-    ->(inbound_mail) { valid_to_address?(inbound_mail) && (reply_uuid_mail?(inbound_mail) || in_reply_to_mail?(inbound_mail)) } => :reply
+    ->(inbound_mail) {
+      valid_recipient_address?(inbound_mail) &&
+        (uuid_reply_email?(inbound_mail) || in_reply_to_header_matches?(inbound_mail))
+    } => :reply
   )
 
-  # routes as a new conversation in email channel
+  # Route to SupportMailbox: if email starts a new conversation via email channel
   routing(
-    ->(inbound_mail) { valid_to_address?(inbound_mail) && EmailChannelFinder.new(inbound_mail.mail).perform.present? } => :support
+    ->(inbound_mail) {
+      valid_recipient_address?(inbound_mail) &&
+        EmailChannelFinder.new(inbound_mail.mail).perform.present?
+    } => :support
   )
 
-  # catchall
+  # Catch-all: send unmatched emails to NeuraDefaultMailbox
   routing(all: :default)
 
   class << self
-    # checks if follow this pattern then send it to reply_mailbox
-    # <account/#{@account.id}/conversation/#{@conversation.uuid}@#{@account.inbound_email_domain}>
-    def in_reply_to_mail?(inbound_mail)
+    # Checks if the 'In-Reply-To' header matches an existing conversation pattern or source ID
+    def in_reply_to_header_matches?(inbound_mail)
       in_reply_to = inbound_mail.mail.in_reply_to
 
       in_reply_to.present? && (
-        in_reply_to_matches?(in_reply_to) || Message.exists?(source_id: in_reply_to)
+        conversation_message_id_match?(in_reply_to) || Message.exists?(source_id: in_reply_to)
       )
     end
 
-    def in_reply_to_matches?(in_reply_to)
+    # Matches conversation format in 'In-Reply-To'
+    def conversation_message_id_match?(in_reply_to)
       Array.wrap(in_reply_to).any? { _1.match?(CONVERSATION_MESSAGE_ID_PATTERN) }
     end
 
-    # checks if follow this pattern  send it to reply_mailbox
-    # reply+<conversation-uuid>@<mailer-domain.com>
-    def reply_uuid_mail?(inbound_mail)
+    # Matches the 'reply+UUID@...' pattern for routed reply handling
+    def uuid_reply_email?(inbound_mail)
       inbound_mail.mail.to&.any? do |email|
-        conversation_uuid = email.split('@')[0]
-        conversation_uuid.match?(REPLY_EMAIL_UUID_PATTERN)
+        local_part = email.split('@')[0]
+        local_part.match?(REPLY_EMAIL_UUID_PATTERN)
       end
     end
 
-    # if mail.to returns a string, then it is a malformed `to` header
-    # valid `to` header will be of type Mail::AddressContainer
-    # validate if the to address is of type string
-    def valid_to_address?(inbound_mail)
-      to_address_class = inbound_mail.mail.to&.class
-      return true if to_address_class == Mail::AddressContainer
+    # Validates that the email's `to` header is structurally correct
+    def valid_recipient_address?(inbound_mail)
+      address_class = inbound_mail.mail.to&.class
+      return true if address_class == Mail::AddressContainer
 
-      Rails.logger.error "Email to address header is malformed `#{inbound_mail.mail.to}`"
+      Rails.logger.error "[NeuraChat] Malformed email 'to' header: #{inbound_mail.mail.to}"
       false
     end
   end
